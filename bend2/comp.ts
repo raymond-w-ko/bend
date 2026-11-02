@@ -211,6 +211,16 @@ const OPERATIONS: Record<string, Intr> = Object.setPrototypeOf({
   string_append: { JS: "($0 + $1)" },
   string_contains: { JS: "string_contains($0, $1)" },
   string_length: { JS: "[...str_out($0)].length" },
+  // a Vec is a JS array, never written in place (C runs Base's defs)
+  vec_length: { JS: "$0.length" },
+  vec_get: { JS: "($1 < $0.length ? {$: \"Some\", value: $0[$1]}"
+    + " : {$: \"None\"})" },
+  vec_at: { JS: "($1 < $0.length ? $0[$1] : $2)" },
+  vec_set: { JS: "vec_set($0, $1, $2)" },
+  vec_push: { JS: "vec_push($0, $1)" },
+  vec_take: { JS: "$0.slice(0, $1)" },
+  vec_from_list: { JS: "vec_from_list($0)" },
+  vec_to_list: { JS: "vec_to_list($0)" },
   ...Object.fromEntries(Object.entries({
     new: "array_new($0, $1)", set: "($0[$1 % $0.length] = $2, $0)",
     get: "{$: \"Tuple\", fst: $0, snd: $0[$1 % $0.length]}",
@@ -261,6 +271,14 @@ const OPTIMIZED: Record<Name, Native> = Object.setPrototypeOf({
       intr: "($0 + $1)",
       elim: ["$0.slice(0, char_len($0))", "$0.slice(char_len($0))"],
       cond: "$0 !== \"\"",
+    },
+  },
+  Vec: {
+    VNil: { intr: "[]", cond: "$0.length === 0" },
+    VCon: {
+      intr: "[$0, ...$1]",
+      elim: ["$0[0]", "$0.slice(1)"],
+      cond: "$0.length !== 0",
     },
   },
 } satisfies Record<Name, Native>, null);
@@ -6102,6 +6120,40 @@ function array_rmw(a, i, f) {
   const old = a[at];
   a[at] = f(old);
   return {$: "Tuple", fst: a, snd: old};
+}
+
+// Vec
+// ===
+
+function vec_set(a, i, x) {
+  if (i >= a.length) {
+    return a;
+  }
+  const b = a.slice();
+  b[i] = x;
+  return b;
+}
+
+function vec_push(a, x) {
+  const b = a.slice();
+  b.push(x);
+  return b;
+}
+
+function vec_from_list(xs) {
+  const a = [];
+  for (; xs.$ === "Con"; xs = xs.tail) {
+    a.push(xs.head);
+  }
+  return a;
+}
+
+function vec_to_list(a) {
+  let xs = {$: "Nil"};
+  for (let i = a.length - 1; i >= 0; i--) {
+    xs = {$: "Con", head: a[i], tail: xs};
+  }
+  return xs;
 }
 
 // Run

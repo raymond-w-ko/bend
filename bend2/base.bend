@@ -78,6 +78,15 @@ type Array<-T: Type> is Type:
   ALeaf{value: T}
   ANode{xs: Array<T>, ys: Array<T>}
 
+# A Vec is a list of Data, and the checker reasons about it as one. JS
+# keeps it as an array: Vec.length, Vec.get and Vec.at take one step,
+# Vec.set and Vec.push copy it once, and it is shared, never written in
+# place, so a Vec is Data. A match on one copies its tail: walk it by
+# index.
+type Vec<-A: Data> is Data:
+  VNil{}
+  VCon{head: A, tail: Vec<A>}
+
 type Image is Data:
   Pix{color: U32}
   Qua{tl: Image, tr: Image, bl: Image, br: Image}
@@ -2849,6 +2858,79 @@ def Array.map.seed(~T: Data, ~U: Data, ~f: T -> U, r: Array<T> & T) -> Array<U>:
 
 def Array.map(~T: Data, ~U: Data, ~f: T -> U, a: Array<T>) -> Array<U>:
   Array.map.seed(~T, ~U, ~f, Array.get(T, a, 0))
+
+# Vec
+# ---
+# Each def here is also a JS operation (comp.ts), on the array JS keeps.
+
+def Vec.length(-A: Data, xs: Vec<A>) -> Nat:
+  match xs:
+    case VNil{}:
+      0n
+    case VCon{h, t}:
+      1n+Vec.length(A, t)
+
+# The item at n, if there is one.
+def Vec.get(-A: Data, xs: Vec<A>, n: Nat) -> Maybe<&2, A>:
+  match xs n:
+    case VNil{} _:
+      None{}
+    case VCon{h, t} 0n:
+      Some{h}
+    case VCon{h, t} 1n+p:
+      Vec.get(A, t, p)
+
+# The item at n, or d past the end.
+def Vec.at(-A: Data, xs: Vec<A>, n: Nat, d: A) -> A:
+  match xs n:
+    case VNil{} _:
+      d
+    case VCon{h, t} 0n:
+      h
+    case VCon{h, t} 1n+p:
+      Vec.at(A, t, p, d)
+
+# x in place of the item at n; past the end, the same Vec.
+def Vec.set(-A: Data, xs: Vec<A>, n: Nat, x: A) -> Vec<A>:
+  match xs n:
+    case VNil{} _:
+      VNil{}
+    case VCon{h, t} 0n:
+      VCon{x, t}
+    case VCon{h, t} 1n+p:
+      VCon{h, Vec.set(A, t, p, x)}
+
+# x after the last item.
+def Vec.push(-A: Data, xs: Vec<A>, x: A) -> Vec<A>:
+  match xs:
+    case VNil{}:
+      VCon{x, VNil{}}
+    case VCon{h, t}:
+      VCon{h, Vec.push(A, t, x)}
+
+# The first n items.
+def Vec.take(-A: Data, xs: Vec<A>, n: Nat) -> Vec<A>:
+  match xs n:
+    case VNil{} _:
+      VNil{}
+    case VCon{h, t} 0n:
+      VNil{}
+    case VCon{h, t} 1n+p:
+      VCon{h, Vec.take(A, t, p)}
+
+def Vec.from_list(-A: Data, xs: List<&2, A>) -> Vec<A>:
+  match xs:
+    case []:
+      VNil{}
+    case h <> t:
+      VCon{h, Vec.from_list(A, t)}
+
+def Vec.to_list(-A: Data, xs: Vec<A>) -> List<&2, A>:
+  match xs:
+    case VNil{}:
+      []
+    case VCon{h, t}:
+      h <> Vec.to_list(A, t)
 
 # Map
 # ---
