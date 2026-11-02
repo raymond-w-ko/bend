@@ -3023,6 +3023,18 @@ function js_tag(k: Name): string {
   return k.slice(k.indexOf(":") + 1);
 }
 
+// The shared value of each constructor with no fields, by its tag: a
+// const of the program (js_lib writes them first).
+const CTORS = new WeakMap<object, Map<string, string>>();
+
+function js_ctors(): Map<string, string> {
+  return memo(CTORS as any, FL, () => new Map()) as Map<string, string>;
+}
+
+function js_ctor(tag: string): string {
+  return memo(js_ctors(), tag, () => name_id("K$", tag));
+}
+
 function js_text(t: HTerm): string {
   const s = Bend.term_strip(t);
   return s.$ === "Lit"
@@ -3085,6 +3097,11 @@ function js_expr(sc: Scope, tm: HTerm, ty0: HTerm | null = null): string {
         return tpl(native[x.k].intr, exprs);
       }
       const fs = ctr_live(FL.book.ctrs[x.k]);
+      if (exprs.length === 0) {
+        // a constructor with no fields is one shared value: JS never
+        // writes into a value of the program, so sharing one is the same
+        return js_ctor(js_tag(x.k));
+      }
       return `{$: "${js_tag(x.k)}"${exprs.map((z, j) =>
         ", " + js_key(fs[j][1]) + z).join("")}}`;
     }
@@ -3296,7 +3313,10 @@ export function js_lib(book: Bend.Book, mod = false): string {
       : f};`;
   });
   PROBES.length = 1;
-  const js = RUNTIME + effs + "// Program\n// =======\n\n" + [...funs,
+  const ctors = [...js_ctors()].map(([tag, id]) =>
+    `const ${id} = {$: ${JSON.stringify(tag)}};`);
+  const js = RUNTIME + effs + "// Program\n// =======\n\n" + [...ctors,
+    ...funs,
     ...entries, ...[...FL.tabs].map(([r, i]) => `const TAB_${i} = [${r}];`)].join("\n")
     + lib;
   // a module's host outlives its book
