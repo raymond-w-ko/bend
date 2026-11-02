@@ -452,6 +452,85 @@ function let_live(t: Of<"Let">): boolean[] {
   return o.ps.map((p) => term_use(u, p) > 0);
 }
 
+// A JS call of Bool.and or Bool.or with both arguments: its name and them.
+// (Bool.or is an operation, so its spine has no def.)
+function bool_call(tm: HTerm): [Name, HTerm[]] | null {
+  if (!FL.js) {
+    return null;
+  }
+  const m = term_spine(tm);
+  const k = m.t.$ === "Ref" ? m.t.k : null;
+  return (k === "Bool.and" || k === "Bool.or") && m.args.length === 2
+    ? [k, m.args] : null;
+}
+
+// A def that gives one of its arguments, or a constant, by the Bool it
+// takes first and matches (Base-style pick(c, a, b), count_if(ok, n)):
+// for True and for False, the index of the argument it gives, or the
+// constant. In JS a call of it computes only that argument: Bend is pure
+// and total, so leaving the other uncomputed changes no result.
+type Pick = number | HTerm;
+
+const PICKS = new WeakMap<object, Map<Name, Pick[] | null>>();
+
+function bool_pick(k: Name): Pick[] | null {
+  if (!FL.js) {
+    return null;
+  }
+  const picks = memo(PICKS as any, FL, () => new Map()) as
+    Map<Name, Pick[] | null>;
+  return memo(picks, k, () => {
+    const tld = tld_of(k);
+    const fn = tld?.$ === "Def" && !intr_of(k, true) && !def_foreign(tld)
+      ? fun_of(k) : null;
+    if (fn === null || fn.h === null || fn.n < 2 || fn.live.length !== fn.n) {
+      return null;
+    }
+    const { arms, end } = mat_arms(fn.h);
+    if (arms.length !== 2 || term_strip(end).$ !== "Efq") {
+      return null;
+    }
+    const got: Record<string, Pick> = {};
+    for (const [c, h] of arms) {
+      if (c !== "True" && c !== "False") {
+        return null;
+      }
+      let b = h;
+      const ps: Of<"Var">[] = [];
+      for (let j = 1; j < fn.n; j++) {
+        const s = term_strip(b);
+        if (s.$ !== "Lam") {
+          return null;
+        }
+        const o = term_open(s);
+        ps.push(o.ps[0]);
+        b = o.b;
+      }
+      const s = term_strip(b);
+      const at = s.$ === "Var" ? ps.findIndex((p) => p.i === s.i) : -1;
+      if (at >= 0) {
+        got[c] = at + 1;
+      } else if (term_const(s)) {
+        got[c] = s;
+      } else {
+        return null;
+      }
+    }
+    return [got.True!, got.False!];
+  });
+}
+
+// A call of such a def with all its arguments: the def's picks and them.
+function pick_call(tm: HTerm): [Pick[], HTerm[]] | null {
+  const m = term_spine(tm);
+  const p = m.k !== null ? bool_pick(m.k) : null;
+  return p !== null && m.xs.length === fun_of(m.k!).n ? [p, m.xs] : null;
+}
+
+function pick_arm(p: Pick, xs: HTerm[]): HTerm {
+  return typeof p === "number" ? xs[p] : p;
+}
+
 function term_spine(tm: HTerm): Spine {
   return memo(FL.spines, tm, () => {
     const apps: Of<"App">[] = [];
@@ -1103,16 +1182,29 @@ function loop_of(k: Name): Name[] {
     const id = stack.push(k) - 1;
     let low = id;
     let self = false;
-    if (done_live(tld_of(k))) {
-      term_any(fun_of(k).h!, (s, tail) => {
-        const d = tail ? term_spine(s).k : null;
+    // in JS, the second argument of a Bool.and or Bool.or in tail position
+    // is in tail position too (js_func returns the first when it decides)
+    const each = (t: HTerm, at_tail: boolean): boolean => term_any(t,
+      (s, tail) => {
+        const m = tail ? term_spine(s) : null;
+        const b = tail ? bool_call(s) : null;
+        if (b !== null) {
+          each(b[1][1], true);
+        }
+        const pc = tail && FL.js ? pick_call(s) : null;
+        if (pc !== null) {
+          pc[0].forEach((p) => typeof p === "number" && each(pc[1][p], true));
+        }
+        const d = m !== null ? m.k : null;
         if (d !== null && done_live(tld_of(d))) {
           const at = stack.indexOf(d);
           self ||= d === k;
           low = Math.min(low, at >= 0 ? at : FL.loops.has(d) ? low : visit(d));
         }
         return false;
-      });
+      }, at_tail);
+    if (done_live(tld_of(k))) {
+      each(fun_of(k).h!, true);
     }
     if (low === id) {
       const all = stack.splice(id);
@@ -2868,6 +2960,31 @@ function js_call(sc: Scope, k: Name, args: HTerm[], tail = false): string {
   if (tld?.$ === "ADT") {
     return "null";
   }
+  if ((k === "Bool.and" || k === "Bool.or") && args.length === 2) {
+    // the second argument only when the first does not decide: Bend is
+    // pure and total, so a value nobody reads need not be computed
+    const v = name_local(sc, "b");
+    file_push(sc, `let ${v} = ${js_expr(sc, args[0])};`);
+    block(sc, k === "Bool.and" ? `if (${v}) {` : `if (!${v}) {`, () =>
+      file_push(sc, `${v} = ${js_expr(sc, args[1])};`));
+    return v;
+  }
+  const pick = bool_pick(k);
+  if (pick !== null && args.length === fun_of(k).n) {
+    // only the argument the Bool picks
+    const v = name_local(sc, "p");
+    const c = js_expr(sc, args[0]);
+    file_push(sc, `let ${v};`, `if (${c}) {`);
+    sc.seg.tab++;
+    file_push(sc, `${v} = ${js_expr(sc, pick_arm(pick[0], args))};`);
+    sc.seg.tab--;
+    file_push(sc, "} else {");
+    sc.seg.tab++;
+    file_push(sc, `${v} = ${js_expr(sc, pick_arm(pick[1], args))};`);
+    sc.seg.tab--;
+    file_push(sc, "}");
+    return v;
+  }
   const exprs = args.map((x) => js_expr(sc, x));
   if (k === CLO_APPLY) {
     const [f, x] = exprs;
@@ -3001,6 +3118,30 @@ function js_expr(sc: Scope, tm: HTerm, ty0: HTerm | null = null): string {
 function js_func(sc: Scope, tm: HTerm, ty0: HTerm | null,
   args: string[]): void {
   const [x, ty] = ty_peel(tm, ty0);
+  const bk = args.length === 0 && x.$ !== "Lam" && !mat_head(x)
+    && x.$ !== "Let" ? bool_call(x) : null;
+  if (bk !== null) {
+    // a tail Bool.and or Bool.or: its second argument is a tail call
+    const a = js_expr(sc, bk[1][0]);
+    file_push(sc, bk[0] === "Bool.and" ? `if (!${a}) return false;`
+      : `if (${a}) return true;`);
+    return js_func(sc, bk[1][1], ty, []);
+  }
+  const pk = args.length === 0 && x.$ !== "Lam" && !mat_head(x)
+    && x.$ !== "Let" ? pick_call(x) : null;
+  if (pk !== null) {
+    // a tail pick: each argument it may give is a tail call
+    const c = js_expr(sc, pk[1][0]);
+    file_push(sc, `if (${c}) {`);
+    sc.seg.tab++;
+    js_func(sc, pick_arm(pk[0][0], pk[1]), ty, []);
+    sc.seg.tab--;
+    file_push(sc, "} else {");
+    sc.seg.tab++;
+    js_func(sc, pick_arm(pk[0][1], pk[1]), ty, []);
+    sc.seg.tab--;
+    return file_push(sc, "}");
+  }
   if (args.length === 0 && fun_live(x, ty)) {
     return file_push(sc, `return ${js_expr(sc, x, ty)};`);
   }
