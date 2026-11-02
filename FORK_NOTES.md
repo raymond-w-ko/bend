@@ -25,6 +25,9 @@ and its runtime), with a test each in `tests/compile/`. `bend2/bend.ts`
    no linear threading of the owner. A `match` on a `Vec` slices its tail
    (O(n) a step): walk one by index. Test: `tests/compile/vec_ops.bend`.
 
+   `Vec` is Haskell's immutable `Data.Vector`: O(1) read and length,
+   O(n) copy per write. It is not Agda's length-indexed `Vec n A`.
+
    Why not `Array`: `Array` is linear (`Type`), so every read must hand
    the array back (`Array.get` returns a pair), and Bend refuses to
    destructure a computed value (a match takes a parameter or a pattern's
